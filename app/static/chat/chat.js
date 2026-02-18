@@ -803,6 +803,15 @@ async function uploadImages(files) {
   return uploaded.filter(Boolean);
 }
 
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
 async function sendChat() {
   const prompt = String(q('chat-input').value || '').trim();
   if (!prompt && !chatAttachments.length) return showToast('请输入内容或上传图片', 'warning');
@@ -1243,8 +1252,10 @@ async function generateVideo() {
   try {
     let imgUrls = [];
     if (videoAttachments.length) {
-      showToast('上传图片中...', 'info');
-      imgUrls = await uploadImages(videoAttachments.slice(0, 1).map((x) => x.file));
+      showToast('处理图片中...', 'info');
+      const file = videoAttachments[0].file;
+      const dataUrl = await fileToDataUrl(file);
+      imgUrls = [dataUrl];
     }
 
     const userContent = imgUrls.length
