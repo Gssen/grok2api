@@ -5,6 +5,7 @@ let models = [];
 let chatMessages = [];
 let chatAttachments = []; // { file, previewUrl }
 let videoAttachments = [];
+let imageRefAttachments = [];
 let imageGenerationMethod = 'legacy';
 let imageGenerationExperimental = false;
 let imageContinuousSockets = [];
@@ -246,10 +247,17 @@ function bindFileInputs() {
     addAttachments('video', files);
     q('video-file').value = '';
   });
+
+  q('image-ref-file').addEventListener('change', () => {
+    const files = Array.from(q('image-ref-file').files || []);
+    if (!files.length) return;
+    addAttachments('image-ref', files);
+    q('image-ref-file').value = '';
+  });
 }
 
 function addAttachments(kind, files) {
-  const list = kind === 'video' ? videoAttachments : chatAttachments;
+  const list = kind === 'video' ? videoAttachments : kind === 'image-ref' ? imageRefAttachments : chatAttachments;
   files.forEach((f) => {
     if (!String(f.type || '').toLowerCase().startsWith('image/')) return;
     const url = URL.createObjectURL(f);
@@ -259,9 +267,9 @@ function addAttachments(kind, files) {
 }
 
 function renderAttachments(kind) {
-  const list = kind === 'video' ? videoAttachments : chatAttachments;
-  const info = kind === 'video' ? q('video-attach-info') : q('chat-attach-info');
-  const box = kind === 'video' ? q('video-attach-preview') : q('chat-attach-preview');
+  const list = kind === 'video' ? videoAttachments : kind === 'image-ref' ? imageRefAttachments : chatAttachments;
+  const info = kind === 'video' ? q('video-attach-info') : kind === 'image-ref' ? q('image-ref-info') : q('chat-attach-info');
+  const box = kind === 'video' ? q('video-attach-preview') : kind === 'image-ref' ? q('image-ref-preview') : q('chat-attach-preview');
   info.textContent = list.length ? `已选择 ${list.length} 张图片` : '';
   box.innerHTML = '';
   if (!list.length) {
@@ -366,7 +374,6 @@ function updateImageRunModeUI() {
 function updateImageModeUI() {
   const isExperimental = imageGenerationExperimental;
   const hint = q('image-mode-hint');
-  const aspectWrap = q('image-aspect-wrap');
   const concurrencyWrap = q('image-concurrency-wrap');
   const runModeWrap = q('image-run-mode-wrap');
   const runMode = q('image-run-mode');
@@ -376,7 +383,6 @@ function updateImageModeUI() {
   }
 
   if (hint) hint.classList.toggle('hidden', !isExperimental);
-  if (aspectWrap) aspectWrap.classList.toggle('hidden', !isExperimental);
   if (concurrencyWrap) concurrencyWrap.classList.toggle('hidden', !isExperimental);
   if (runModeWrap) runModeWrap.classList.toggle('hidden', !isExperimental);
   if (runMode && !isExperimental) runMode.value = 'single';
@@ -776,6 +782,10 @@ function pickVideoImage() {
   q('video-file').click();
 }
 
+function pickImageRefImage() {
+  q('image-ref-file').click();
+}
+
 async function uploadImages(files) {
   const headers = buildApiHeaders();
   if (!headers.Authorization) throw new Error('Missing API Key');
@@ -942,7 +952,7 @@ function buildImageRequestConfig() {
   const ratio = String(q('image-aspect')?.value || '2:3');
   const concurrency = Math.max(1, Math.min(3, Math.floor(Number(q('image-concurrency')?.value || 1) || 1)));
   if (!imageGenerationExperimental) {
-    return { size: '1024x1024', concurrency: 1 };
+    return { size: ratio, concurrency: 1 };
   }
   return { size: ratio, concurrency };
 }
@@ -1020,12 +1030,85 @@ async function streamImage(body, headers) {
   return rendered;
 }
 
+async function streamImageEdits(formData, apiHeaders) {
+  const res = await fetch('/v1/images/edits', {
+    method: 'POST',
+    headers: apiHeaders,
+    body: formData,
+  });
+
+  if (!res.ok || !res.body) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`HTTP ${res.status}: ${t.slice(0, 200)}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const cardMap = new Map();
+  const completedSet = new Set();
+  let rendered = 0;
+  let buf = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buf += decoder.decode(value, { stream: true });
+    const blocks = buf.split('\n\n');
+    buf = blocks.pop() || '';
+
+    for (const block of blocks) {
+      const lines = block.split('\n').map((line) => line.trim()).filter(Boolean);
+      if (!lines.length) continue;
+
+      let event = '';
+      const dataLines = [];
+      lines.forEach((line) => {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+      });
+
+      const payload = dataLines.join('\n').trim();
+      if (!payload) continue;
+      if (payload === '[DONE]') return rendered;
+
+      let obj = null;
+      try {
+        obj = JSON.parse(payload);
+      } catch (e) {
+        continue;
+      }
+
+      const type = String(obj?.type || event || '').trim();
+      const idx = Math.max(0, Number(obj?.index) || 0);
+      const card = ensureImageCard(cardMap, idx);
+
+      if (type === 'image_generation.partial_image') {
+        updateImageCardProgress(card, obj?.progress ?? 0);
+        continue;
+      }
+
+      if (type === 'image_generation.completed') {
+        const src = pickImageSrc(obj);
+        const failed = !src;
+        updateImageCardCompleted(card, src, failed);
+        if (!failed && !completedSet.has(idx)) {
+          completedSet.add(idx);
+          rendered += 1;
+        }
+      }
+    }
+  }
+
+  return rendered;
+}
+
 async function generateImage() {
   const prompt = String(q('image-prompt').value || '').trim();
   if (!prompt) return showToast('请输入 prompt', 'warning');
 
-  const headers = { ...buildApiHeaders(), 'Content-Type': 'application/json' };
-  if (!headers.Authorization) return showToast('请先填写 API Key', 'warning');
+  const apiHeaders = buildApiHeaders();
+  if (!apiHeaders.Authorization) return showToast('请先填写 API Key', 'warning');
 
   if (imageGenerationExperimental && getImageRunMode() === 'continuous') {
     startImageContinuous();
@@ -1039,15 +1122,71 @@ async function generateImage() {
   const stream = Boolean(q('stream-toggle').checked);
   const useStream = stream && n <= 2;
   const { size, concurrency } = buildImageRequestConfig();
+  const hasRefImages = imageRefAttachments.length > 0;
 
   q('image-results').innerHTML = '';
   showToast('生成中...', 'info');
 
-  const reqBody = { prompt, model, n, size, concurrency };
   try {
     if (stream && !useStream) {
       showToast('n > 2 disables stream and falls back to non-stream mode.', 'warning');
     }
+
+    if (hasRefImages) {
+      // Use /v1/images/edits with multipart/form-data
+      const fd = new FormData();
+      fd.append('prompt', prompt);
+      fd.append('model', model);
+      fd.append('n', String(n));
+      fd.append('size', size);
+      imageRefAttachments.forEach((att) => {
+        fd.append('image[]', att.file);
+      });
+
+      if (useStream) {
+        fd.append('stream', 'true');
+        const rendered = await streamImageEdits(fd, apiHeaders);
+        if (!rendered) throw new Error('No image generated');
+      } else {
+        fd.append('stream', 'false');
+        const res = await fetch('/v1/images/edits', {
+          method: 'POST',
+          headers: apiHeaders,
+          body: fd,
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data?.error?.message || data?.detail || `HTTP ${res.status}`);
+
+        const items = Array.isArray(data?.data) ? data.data : [];
+        if (!items.length) throw new Error('No image generated');
+
+        let rendered = 0;
+        items.forEach((it, idx) => {
+          const src = pickImageSrc(it);
+          const card = createImageCard(idx);
+          q('image-results').appendChild(card);
+          if (!src) {
+            updateImageCardCompleted(card, '', true);
+            return;
+          }
+          rendered += 1;
+          updateImageCardCompleted(card, src, false);
+        });
+        if (!rendered) throw new Error('Image data is empty or unsupported');
+      }
+
+      // Clear ref attachments after generation
+      imageRefAttachments.forEach((a) => {
+        try { URL.revokeObjectURL(a.previewUrl); } catch (e) {}
+      });
+      imageRefAttachments = [];
+      renderAttachments('image-ref');
+      return;
+    }
+
+    // No reference images — use /v1/images/generations
+    const headers = { ...apiHeaders, 'Content-Type': 'application/json' };
+    const reqBody = { prompt, model, n, size, concurrency };
 
     if (useStream) {
       const rendered = await streamImage(reqBody, headers);

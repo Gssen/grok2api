@@ -99,7 +99,7 @@
             <label class="field-label">数量 n</label>
             <input id="image-n" type="number" class="geist-input" min="1" max="10" value="1" />
           </div>
-          <div id="image-aspect-wrap" class="col-span-6 md:col-span-2 hidden">
+          <div id="image-aspect-wrap" class="col-span-6 md:col-span-2">
             <label class="field-label">宽高比</label>
             <select id="image-aspect" class="geist-input h-[34px]">
               <option value="2:3">2:3</option>
@@ -136,6 +136,14 @@
           </div>
           <div id="image-empty-state" class="result-placeholder">等待开始持续生图...</div>
           <div id="image-waterfall" class="image-waterfall"></div>
+        </div>
+        <div class="image-ref-composer mt-3">
+          <div class="composer-row">
+            <input id="image-ref-file" type="file" accept="image/*" multiple class="hidden" />
+            <button class="geist-button-outline text-xs px-3" onclick="pickImageRefImage()">上传参考图（可选）</button>
+            <div id="image-ref-info" class="text-xs text-[var(--accents-5)]"></div>
+          </div>
+          <div id="image-ref-preview" class="attach-preview hidden"></div>
         </div>
         <div id="image-results" class="results-grid mt-4"></div>
       </div>
