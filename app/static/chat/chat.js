@@ -1134,11 +1134,11 @@ async function generateImage() {
 
     if (hasRefImages) {
       // Use /v1/images/edits with multipart/form-data
+      const editModel = 'grok-imagine-1.0-edit';
       const fd = new FormData();
       fd.append('prompt', prompt);
-      fd.append('model', model);
+      fd.append('model', editModel);
       fd.append('n', String(n));
-      fd.append('size', size);
       imageRefAttachments.forEach((att) => {
         fd.append('image[]', att.file);
       });

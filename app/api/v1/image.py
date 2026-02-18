@@ -237,7 +237,7 @@ def response_field_name(response_format: str) -> str:
 
 def _image_generation_method() -> str:
     return resolve_image_generation_method(
-        get_config("grok.image_generation_method", IMAGE_METHOD_LEGACY)
+        get_config("grok.image_generation_method", IMAGE_METHOD_IMAGINE_WS_EXPERIMENTAL)
     )
 
 
