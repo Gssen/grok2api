@@ -1184,12 +1184,6 @@ async function generateImage() {
         if (!rendered) throw new Error('Image data is empty or unsupported');
       }
 
-      // Clear ref attachments after generation
-      imageRefAttachments.forEach((a) => {
-        try { URL.revokeObjectURL(a.previewUrl); } catch (e) {}
-      });
-      imageRefAttachments = [];
-      renderAttachments('image-ref');
       return;
     }
 
@@ -1279,11 +1273,6 @@ async function generateVideo() {
       renderContent(bubble, content, false);
     }
 
-    videoAttachments.forEach((a) => {
-      try { URL.revokeObjectURL(a.previewUrl); } catch (e) {}
-    });
-    videoAttachments = [];
-    renderAttachments('video');
   } catch (e) {
     showToast('生成视频失败: ' + (e?.message || e), 'error');
   }
