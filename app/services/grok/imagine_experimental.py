@@ -37,6 +37,8 @@ IMAGE_METHOD_ALIASES = {
 IMAGINE_WS_API = "wss://grok.com/ws/imagine/listen"
 ASSET_API = "https://assets.grok.com"
 TIMEOUT = 120
+FINAL_MIN_BYTES = 100_000
+MEDIUM_MIN_BYTES = 30_000
 
 ProgressCallback = Callable[[int, float], Optional[Awaitable[None] | None]]
 CompletedCallback = Callable[[int, str], Optional[Awaitable[None] | None]]
@@ -76,6 +78,20 @@ class ImagineExperimentalService:
     def _proxies(self) -> Optional[dict]:
         return {"http": self.proxy, "https": self.proxy} if self.proxy else None
 
+    def _ws_headers(self, token: str) -> Dict[str, str]:
+        """Build lightweight headers for WebSocket connections (no Content-Type, Sec-Fetch-*, etc.)."""
+        token_value = token[4:] if token.startswith("sso=") else token
+        cf = get_config("grok.cf_clearance", "")
+        cookie = f"sso={token_value};cf_clearance={cf}" if cf else f"sso={token_value}"
+        return {
+            "Origin": "https://grok.com",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Cookie": cookie,
+        }
+
     def _headers(self, token: str, referer: str = "https://grok.com/imagine") -> Dict[str, str]:
         headers = ChatRequestBuilder.build_headers(token)
         headers["Referer"] = referer
@@ -97,7 +113,7 @@ class ImagineExperimentalService:
                     {
                         "requestId": request_id,
                         "text": prompt,
-                        "type": "input_scroll",
+                        "type": "input_text",
                         "properties": {
                             "section_count": 0,
                             "is_kids_mode": False,
@@ -145,6 +161,23 @@ class ImagineExperimentalService:
             return True
         return False
 
+    @staticmethod
+    def _is_final_blob(msg: Dict[str, Any]) -> bool:
+        """Check if msg contains a final-quality image blob (by size threshold)."""
+        blob = msg.get("blob")
+        if not isinstance(blob, str) or not blob:
+            return False
+        return len(blob) >= FINAL_MIN_BYTES
+
+    @staticmethod
+    def _is_medium_blob(msg: Dict[str, Any]) -> bool:
+        """Check if msg contains a medium-quality image blob."""
+        blob = msg.get("blob")
+        if not isinstance(blob, str) or not blob:
+            return False
+        size = len(blob)
+        return MEDIUM_MIN_BYTES <= size < FINAL_MIN_BYTES
+
     async def generate_ws(
         self,
         token: str,
@@ -169,11 +202,15 @@ class ImagineExperimentalService:
         started_at = time.monotonic()
         image_indices: Dict[str, int] = {}
         final_urls: Dict[str, str] = {}
+        # Track blob-based final images (base64 data returned directly via WS)
+        final_blobs: Dict[str, str] = {}
+        medium_received_at: Optional[float] = None
+        blocked_grace = 10.0
 
         try:
             ws = await session.ws_connect(
                 IMAGINE_WS_API,
-                headers=self._headers(token),
+                headers=self._ws_headers(token),
                 timeout=effective_timeout,
                 proxies=self._proxies(),
                 impersonate=BROWSER,
@@ -185,6 +222,18 @@ class ImagineExperimentalService:
                 try:
                     msg = await ws.recv_json(timeout=min(5.0, remain))
                 except asyncio.TimeoutError:
+                    # Check for blocked: medium preview received but no final within grace period
+                    if (
+                        medium_received_at
+                        and not final_blobs
+                        and not final_urls
+                        and time.monotonic() - medium_received_at > blocked_grace
+                    ):
+                        logger.warning(
+                            f"Imagine stream suspected blocked: medium preview received but no final image "
+                            f"within {blocked_grace:.1f}s (request_id={request_id})"
+                        )
+                        break
                     continue
                 except Exception as e:
                     raise UpstreamException(f"Imagine websocket receive failed: {e}") from e
@@ -223,6 +272,29 @@ class ImagineExperimentalService:
                     except Exception as e:
                         logger.debug(f"Imagine progress callback failed: {e}")
 
+                # Handle blob-based image responses (type: "image" with blob data)
+                if msg_type == "image" and self._is_final_blob(msg):
+                    image_url = self._extract_url(msg)
+                    if image_id not in final_blobs:
+                        final_blobs[image_id] = image_url or image_id
+                        logger.debug(f"Final blob image received: id={image_id}, blob_size={len(msg.get('blob', ''))}")
+                        if completed_cb is not None:
+                            try:
+                                maybe_coro = completed_cb(image_indices[image_id], image_url or image_id)
+                                if asyncio.iscoroutine(maybe_coro):
+                                    await maybe_coro
+                            except Exception as e:
+                                logger.debug(f"Imagine completion callback failed: {e}")
+                    if len(final_blobs) + len(final_urls) >= target_count:
+                        break
+                    continue
+
+                if msg_type == "image" and self._is_medium_blob(msg):
+                    if medium_received_at is None:
+                        medium_received_at = time.monotonic()
+                    continue
+
+                # Handle URL-based image responses (legacy status-based completion)
                 image_url = self._extract_url(msg)
                 if image_url and self._is_completed(msg, progress):
                     is_new = image_id not in final_urls
@@ -234,13 +306,19 @@ class ImagineExperimentalService:
                                 await maybe_coro
                         except Exception as e:
                             logger.debug(f"Imagine completion callback failed: {e}")
-                    if len(final_urls) >= target_count:
+                    if len(final_urls) + len(final_blobs) >= target_count:
                         break
 
-            if not final_urls:
+            # Merge: prefer URL-based results, fall back to blob-based
+            all_results = list(final_urls.values())
+            for bid, burl in final_blobs.items():
+                if bid not in final_urls:
+                    all_results.append(burl)
+
+            if not all_results:
                 raise UpstreamException("Imagine websocket returned no completed images")
 
-            return list(final_urls.values())
+            return all_results
         finally:
             if ws is not None:
                 try:

@@ -1,5 +1,4 @@
 import { sendConversationRequest } from "./conversation";
-import { getDynamicHeaders } from "./headers";
 import type { GrokSettings } from "../settings";
 
 export const IMAGE_METHOD_LEGACY = "legacy" as const;
@@ -18,6 +17,7 @@ export type ImageGenerationMethod =
 const IMAGINE_WS_HTTP_API = "https://grok.com/ws/imagine/listen";
 const IMAGINE_REFERER = "https://grok.com/imagine";
 const ASSET_API = "https://assets.grok.com";
+const FINAL_MIN_BYTES = 100_000;
 
 type WsJson = Record<string, unknown>;
 
@@ -130,6 +130,25 @@ function isCompleted(msg: WsJson, progress: number | null): boolean {
   return progress !== null && progress >= 100;
 }
 
+function isFinalBlob(msg: WsJson): boolean {
+  const blob = msg.blob;
+  return typeof blob === "string" && blob.length >= FINAL_MIN_BYTES;
+}
+
+function buildWsHeaders(cookie: string): Record<string, string> {
+  return {
+    Origin: "https://grok.com",
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
+    Cookie: cookie,
+    Connection: "Upgrade",
+    Upgrade: "websocket",
+  };
+}
+
 function buildImagineWsPayload(prompt: string, requestId: string, aspectRatio: string): WsJson {
   return {
     type: "conversation.item.create",
@@ -140,7 +159,7 @@ function buildImagineWsPayload(prompt: string, requestId: string, aspectRatio: s
         {
           requestId,
           text: prompt,
-          type: "input_scroll",
+          type: "input_text",
           properties: {
             section_count: 0,
             is_kids_mode: false,
@@ -170,13 +189,7 @@ export async function generateImagineWs(args: {
   const aspectRatio = resolveAspectRatio(args.aspectRatio);
   const requestId = crypto.randomUUID();
 
-  const headers = getDynamicHeaders(args.settings, "/ws/imagine/listen");
-  headers.Cookie = args.cookie;
-  headers.Origin = "https://grok.com";
-  headers.Referer = IMAGINE_REFERER;
-  headers.Connection = "Upgrade";
-  headers.Upgrade = "websocket";
-  delete headers["Content-Type"];
+  const headers = buildWsHeaders(args.cookie);
 
   const wsResp = await fetch(IMAGINE_WS_HTTP_API, { method: "GET", headers });
   const ws = wsResp.webSocket;
@@ -223,6 +236,21 @@ export async function generateImagineWs(args: {
       }
 
       const imageUrl = extractUrl(msg);
+
+      // Handle blob-based image responses (type: "image" with large blob data)
+      if (type === "image" && isFinalBlob(msg)) {
+        const blobImageUrl = imageUrl || imageId;
+        if (!finalUrls.has(imageId)) finalUrls.set(imageId, blobImageUrl);
+        if (args.completedCb) {
+          Promise.resolve(args.completedCb({ index: imageIndex, url: blobImageUrl })).catch(() => {
+            // ignore callback failures
+          });
+        }
+        if (finalUrls.size >= targetCount) finish();
+        return;
+      }
+
+      // Handle URL-based image responses (legacy status-based completion)
       if (imageUrl && isCompleted(msg, progress)) {
         if (!finalUrls.has(imageId)) finalUrls.set(imageId, imageUrl);
         if (args.completedCb) {
