@@ -29,6 +29,7 @@ CHAT_API = "https://grok.com/rest/app-chat/conversations/new"
 BROWSER = "chrome136"
 TIMEOUT = 300
 SINGLE_MAX = 6  # 单次上游最大视频时长(秒)
+_RESOLUTION_MAP = {"SD": "480p", "HD": "720p"}
 DEFAULT_MAX_CONCURRENT = 50
 _MEDIA_SEMAPHORE = asyncio.Semaphore(DEFAULT_MAX_CONCURRENT)
 _MEDIA_SEM_VALUE = DEFAULT_MAX_CONCURRENT
@@ -626,6 +627,7 @@ class VideoService:
         # 生成视频
         service = VideoService()
         round_info = None
+        resolution = _RESOLUTION_MAP.get(resolution, resolution)
 
         if video_length <= SINGLE_MAX:
             # 单轮生成
