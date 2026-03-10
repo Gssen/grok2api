@@ -97,7 +97,7 @@ def _build_extension_config(
                 "mode": "custom",
                 "aspectRatio": aspect_ratio,
                 "videoLength": SINGLE_MAX,
-                "videoResolution": resolution,
+                "resolutionName": resolution,
                 "parentPostId": last_post_id,
                 "isVideoEdit": False,
             }
@@ -131,7 +131,7 @@ def _extract_post_id(resp: dict) -> str:
     # 6. regex from videoUrl
     video_url = svgr.get("videoUrl", "")
     if video_url:
-        m = re.search(r'/([a-zA-Z0-9_-]+)\.mp4', video_url)
+        m = re.search(r'/generated/([0-9a-fA-F-]{32,36})/', video_url)
         if m:
             return m.group(1)
     return ""
@@ -309,7 +309,7 @@ class VideoService:
                     "parentPostId": post_id,
                     "aspectRatio": aspect_ratio,
                     "videoLength": video_length,
-                    "videoResolution": resolution
+                    "resolutionName": resolution
                 }
             }
         }
@@ -662,8 +662,8 @@ class VideoService:
                 else:
                     seed_post_id = await service.create_post(token, prompt)
 
-                original_post_id = ""
-                last_post_id = ""
+                original_post_id = seed_post_id
+                last_post_id = seed_post_id
 
                 # 非最终轮：静默消费，提取 post_id
                 for rp in round_plans[:-1]:
@@ -689,14 +689,15 @@ class VideoService:
                         )
 
                     rr = await _collect_round_result(raw_stream)
-                    if not rr.post_id:
-                        raise UpstreamException(
-                            f"Failed to extract post_id from round "
-                            f"{rp.round_index + 1}"
+                    if rr.post_id:
+                        if rp.round_index == 0:
+                            original_post_id = rr.post_id
+                        last_post_id = rr.post_id
+                    else:
+                        logger.warning(
+                            f"Round {rp.round_index + 1}/{total_rounds}: "
+                            f"no post_id extracted, using seed_post_id={seed_post_id}"
                         )
-                    if rp.round_index == 0:
-                        original_post_id = rr.post_id
-                    last_post_id = rr.post_id
                     logger.info(
                         f"Video round {rp.round_index + 1}/{total_rounds} "
                         f"done, post_id={last_post_id}"
