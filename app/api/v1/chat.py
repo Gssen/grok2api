@@ -38,10 +38,10 @@ class MessageItem(BaseModel):
 class VideoConfig(BaseModel):
     """视频生成配置"""
     aspect_ratio: Optional[str] = Field("3:2", description="视频比例: 3:2, 16:9, 1:1 等")
-    video_length: Optional[int] = Field(6, description="视频时长(秒): 5-15")
+    video_length: Optional[int] = Field(6, description="视频时长(秒): 5-30")
     resolution: Optional[str] = Field("SD", description="视频分辨率: SD, HD")
     preset: Optional[str] = Field("custom", description="风格预设: fun, normal, spicy")
-    
+
     @field_validator("aspect_ratio")
     @classmethod
     def validate_aspect_ratio(cls, v):
@@ -53,14 +53,14 @@ class VideoConfig(BaseModel):
                 code="invalid_aspect_ratio"
             )
         return v
-    
+
     @field_validator("video_length")
     @classmethod
     def validate_video_length(cls, v):
         if v is not None:
-            if v < 5 or v > 15:
+            if v < 5 or v > 30:
                 raise ValidationException(
-                    message="video_length must be between 5 and 15 seconds",
+                    message="video_length must be between 5 and 30 seconds",
                     param="video_config.video_length",
                     code="invalid_video_length"
                 )

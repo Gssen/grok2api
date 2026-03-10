@@ -283,18 +283,19 @@ class CollectProcessor(BaseProcessor):
 class VideoStreamProcessor(BaseProcessor):
     """视频流式响应处理器"""
     
-    def __init__(self, model: str, token: str = "", think: bool = None):
+    def __init__(self, model: str, token: str = "", think: bool = None, round_info: tuple = None):
         super().__init__(model, token)
         self.response_id: Optional[str] = None
         self.think_opened: bool = False
         self.role_sent: bool = False
         self.video_format = get_config("app.video_format", "url")
-        
+        self.round_info = round_info  # (current_round, total_rounds) or None
+
         if think is None:
             self.show_think = get_config("grok.thinking", False)
         else:
             self.show_think = think
-    
+
     def _build_video_html(self, video_url: str, thumbnail_url: str = "") -> str:
         """构建视频 HTML 标签"""
         if get_config("grok.video_poster_preview", False):
@@ -333,7 +334,11 @@ class VideoStreamProcessor(BaseProcessor):
                         if not self.think_opened:
                             yield self._sse("<think>\n")
                             self.think_opened = True
-                        yield self._sse(f"正在生成视频中，当前进度{progress}%\n")
+                        if self.round_info:
+                            cur, total = self.round_info
+                            yield self._sse(f"[round={cur}/{total}] 进度{progress}%\n")
+                        else:
+                            yield self._sse(f"正在生成视频中，当前进度{progress}%\n")
                     
                     if progress == 100:
                         video_url = video_resp.get("videoUrl", "")
