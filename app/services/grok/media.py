@@ -106,52 +106,84 @@ def _build_extension_config(
     }
 
 
-def _extract_post_id(resp: dict) -> str:
-    """Extract post_id from a streaming response line (priority order)."""
-    # 1. modelResponse.fileAttachments
+def _normalize_line(line) -> str:
+    """规范化流式响应行，兼容 SSE data 前缀"""
+    if line is None:
+        return ""
+    if isinstance(line, (bytes, bytearray)):
+        text = line.decode("utf-8", errors="ignore")
+    else:
+        text = str(line)
+    text = text.strip()
+    if not text:
+        return ""
+    if text.startswith("data:"):
+        text = text[5:].strip()
+    if text == "[DONE]":
+        return ""
+    return text
+
+
+def _extract_post_id_ranked(resp: dict, current_rank: int, current_id: str):
+    """Extract post_id with priority ranking (lower rank = higher priority).
+    Returns (rank, post_id) — only updates if new rank < current_rank.
+    """
+    # Rank 1: modelResponse.fileAttachments
     if mr := resp.get("modelResponse"):
-        for att in mr.get("fileAttachments", []):
-            pid = att.get("postId") or att.get("id")
-            if pid:
-                return pid
-    # 2-3. streamingVideoGenerationResponse
-    svgr = resp.get("streamingVideoGenerationResponse", {})
-    if pid := svgr.get("videoPostId"):
-        return pid
-    if pid := svgr.get("postId"):
-        return pid
-    # 4. post.id
+        fa = mr.get("fileAttachments")
+        if isinstance(fa, list) and fa:
+            first = fa[0]
+            pid = first.get("postId") or first.get("id") if isinstance(first, dict) else str(first) if first else ""
+            if pid and 1 < current_rank:
+                return 1, pid
+    # Rank 2: streamingVideoGenerationResponse.videoPostId
+    svgr = resp.get("streamingVideoGenerationResponse")
+    if isinstance(svgr, dict):
+        if pid := svgr.get("videoPostId"):
+            if 2 < current_rank:
+                return 2, pid
+        # Rank 3: streamingVideoGenerationResponse.postId
+        if pid := svgr.get("postId"):
+            if 3 < current_rank:
+                return 3, pid
+    # Rank 4: post.id
     if post := resp.get("post"):
-        if pid := post.get("id"):
-            return pid
-    # 5. top-level postId / parentPostId
-    if pid := resp.get("postId"):
-        return pid
-    if pid := resp.get("parentPostId"):
-        return pid
-    # 6. regex from videoUrl
-    video_url = svgr.get("videoUrl", "")
-    if video_url:
-        m = re.search(r'/generated/([0-9a-fA-F-]{32,36})/', video_url)
-        if m:
-            return m.group(1)
-    return ""
+        if isinstance(post, dict):
+            if pid := post.get("id"):
+                if 4 < current_rank:
+                    return 4, pid
+    # Rank 5: top-level postId / parentPostId / originalPostId
+    for key in ("postId", "parentPostId", "originalPostId"):
+        if pid := resp.get(key):
+            if 5 < current_rank:
+                return 5, pid
+    # Rank 6: regex from videoUrl
+    if isinstance(svgr, dict):
+        video_url = svgr.get("videoUrl", "")
+        if video_url:
+            m = re.search(r'/generated/([0-9a-fA-F-]{32,36})/', video_url)
+            if m and 6 < current_rank:
+                return 6, m.group(1)
+    return current_rank, current_id
 
 
 async def _collect_round_result(response) -> _RoundResult:
     """Consume a round's stream, collecting post_id / video info (no SSE output)."""
     result = _RoundResult()
-    async for line in response:
+    post_id_rank = 99
+    async for raw_line in response:
+        line = _normalize_line(raw_line)
         if not line:
             continue
         try:
             data = orjson.loads(line)
         except Exception:
             continue
-        resp = data.get("result", {}).get("response", {})
-        pid = _extract_post_id(resp)
-        if pid:
-            result.post_id = pid
+        root = data.get("result") if isinstance(data, dict) else None
+        resp = root.get("response") if isinstance(root, dict) else None
+        if not isinstance(resp, dict):
+            continue
+        post_id_rank, result.post_id = _extract_post_id_ranked(resp, post_id_rank, result.post_id)
         if rid := resp.get("responseId"):
             result.response_id = rid
         if svgr := resp.get("streamingVideoGenerationResponse"):
@@ -315,17 +347,44 @@ class VideoService:
             }
         }
 
-        return {
-            "temporary": True,
-            "modelName": "grok-3",
-            "message": full_prompt,
-            "toolOverrides": {"videoGen": True},
+        payload = {
+            "deviceEnvInfo": {
+                "darkModeEnabled": False,
+                "devicePixelRatio": 2,
+                "screenHeight": 1329,
+                "screenWidth": 2056,
+                "viewportHeight": 1083,
+                "viewportWidth": 2056,
+            },
+            "disableMemory": True,
+            "disableSearch": False,
+            "disableSelfHarmShortCircuit": False,
+            "disableTextFollowUps": False,
+            "enableImageGeneration": True,
+            "enableImageStreaming": True,
             "enableSideBySide": True,
+            "fileAttachments": [],
+            "forceConcise": False,
+            "forceSideBySide": False,
+            "imageAttachments": [],
+            "imageGenerationCount": 2,
+            "isAsyncChat": False,
+            "isReasoning": False,
+            "message": full_prompt,
+            "modelMode": None,
+            "modelName": "grok-3",
             "responseMetadata": {
-                "experiments": [],
-                "modelConfigOverride": config_override
-            }
+                "requestModelDetails": {"modelId": "grok-3"},
+                "modelConfigOverride": config_override,
+            },
+            "returnImageBytes": False,
+            "returnRawGrokInXaiRequest": False,
+            "sendFinalMetadata": True,
+            "temporary": True,
+            "toolOverrides": {"videoGen": True},
         }
+
+        return payload
     
     async def generate(
         self,

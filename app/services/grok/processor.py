@@ -307,8 +307,10 @@ class VideoStreamProcessor(BaseProcessor):
     
     async def process(self, response: AsyncIterable[bytes]) -> AsyncGenerator[str, None]:
         """处理视频流式响应"""
+        from app.services.grok.media import _normalize_line
         try:
-            async for line in response:
+            async for raw_line in response:
+                line = _normalize_line(raw_line)
                 if not line:
                     continue
                 try:
@@ -387,20 +389,22 @@ class VideoCollectProcessor(BaseProcessor):
     
     async def process(self, response: AsyncIterable[bytes]) -> dict[str, Any]:
         """处理并收集视频响应"""
+        from app.services.grok.media import _normalize_line
         response_id = ""
         content = ""
-        
+
         try:
-            async for line in response:
+            async for raw_line in response:
+                line = _normalize_line(raw_line)
                 if not line:
                     continue
                 try:
                     data = orjson.loads(line)
                 except orjson.JSONDecodeError:
                     continue
-                
+
                 resp = data.get("result", {}).get("response", {})
-                
+
                 if video_resp := resp.get("streamingVideoGenerationResponse"):
                     if video_resp.get("progress") == 100:
                         response_id = resp.get("responseId", "")
