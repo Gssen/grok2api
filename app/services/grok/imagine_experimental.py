@@ -381,13 +381,15 @@ class ImagineExperimentalService:
         return out
 
     @staticmethod
-    def _build_edit_payload(prompt: str, image_urls: List[str], model_name: str) -> Dict[str, Any]:
+    def _build_edit_payload(prompt: str, image_urls: List[str], model_name: str, parent_post_id: str = "") -> Dict[str, Any]:
         model_map = {
             "imageEditModel": "imagine",
             "imageEditModelConfig": {
                 "imageReferences": image_urls,
             },
         }
+        if parent_post_id:
+            model_map["imageEditModelConfig"]["parentPostId"] = parent_post_id
         payload: Dict[str, Any] = {
             "temporary": True,
             "modelName": model_name,
@@ -432,13 +434,23 @@ class ImagineExperimentalService:
         if not image_urls:
             raise UpstreamException("Experimental image edit requires at least one uploaded image")
 
+        # 创建 parentPostId（参考 chenyme-grok2api）
+        parent_post_id = ""
+        try:
+            from app.services.grok.media import VideoService
+            media_service = VideoService()
+            parent_post_id = await media_service.create_image_post(token, image_urls[0])
+            logger.debug(f"Image edit parent post ID: {parent_post_id}")
+        except Exception as e:
+            logger.warning(f"Create image post for edit failed: {e}")
+
         headers = self._headers(token, referer="https://grok.com/imagine")
         proxies = self._proxies()
         timeout = self.timeout
 
         payloads = [
-            self._build_edit_payload(prompt, image_urls, "imagine-image-edit"),
-            self._build_edit_payload(prompt, image_urls, "grok-3"),
+            self._build_edit_payload(prompt, image_urls, "imagine-image-edit", parent_post_id),
+            self._build_edit_payload(prompt, image_urls, "grok-3", parent_post_id),
         ]
 
         last_error: Optional[Exception] = None
