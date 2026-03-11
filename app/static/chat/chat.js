@@ -467,7 +467,7 @@ function parseWsMessage(raw) {
   }
 }
 
-function openImageContinuousSocket(socketIndex, runToken, prompt, aspectRatio, attempt = 0) {
+function openImageContinuousSocket(socketIndex, runToken, prompt, aspectRatio, refImages, attempt = 0) {
   const wsUrl = buildImagineWsUrl();
   const ws = new WebSocket(wsUrl);
   const socketState = {
@@ -490,7 +490,7 @@ function openImageContinuousSocket(socketIndex, runToken, prompt, aspectRatio, a
       return;
     }
     clearImageContinuousError();
-    ws.send(JSON.stringify({ type: 'start', prompt, aspect_ratio: aspectRatio }));
+    ws.send(JSON.stringify({ type: 'start', prompt, aspect_ratio: aspectRatio, ref_images: refImages || [] }));
   };
 
   ws.onmessage = (event) => {
@@ -576,7 +576,7 @@ function openImageContinuousSocket(socketIndex, runToken, prompt, aspectRatio, a
         setTimeout(() => {
           if (!imageContinuousRunning || runToken !== imageContinuousRunToken) return;
           if (getImageContinuousOpenCount() >= imageContinuousDesiredConcurrency) return;
-          openImageContinuousSocket(socketIndex, runToken, prompt, aspectRatio, socketState.attempt + 1);
+          openImageContinuousSocket(socketIndex, runToken, prompt, aspectRatio, refImages, socketState.attempt + 1);
         }, 1200);
       }
 
@@ -639,20 +639,45 @@ function startImageContinuous() {
   const token = imageContinuousRunToken + 1;
   imageContinuousDesiredConcurrency = concurrency;
 
-  stopImageContinuous();
-  imageContinuousRunToken = token;
-  imageContinuousRunning = true;
-  clearImageContinuousError();
-  imageContinuousActive = 0;
-  if (!q('image-waterfall')?.children?.length) resetImageContinuousMetrics(true);
+  // Convert reference image attachments to base64 data URIs
+  const refFiles = imageRefAttachments.map((att) => att.file).filter(Boolean);
 
-  setImageStatusText('Connecting');
-  updateImageContinuousButtons();
-  updateImageContinuousStats();
+  function _doStart(refDataUris) {
+    stopImageContinuous();
+    imageContinuousRunToken = token;
+    imageContinuousRunning = true;
+    clearImageContinuousError();
+    imageContinuousActive = 0;
+    if (!q('image-waterfall')?.children?.length) resetImageContinuousMetrics(true);
 
-  for (let i = 0; i < concurrency; i += 1) {
-    openImageContinuousSocket(i, token, prompt, aspectRatio);
+    setImageStatusText('Connecting');
+    updateImageContinuousButtons();
+    updateImageContinuousStats();
+
+    for (let i = 0; i < concurrency; i += 1) {
+      openImageContinuousSocket(i, token, prompt, aspectRatio, refDataUris);
+    }
   }
+
+  if (!refFiles.length) {
+    _doStart([]);
+    return;
+  }
+
+  // Read files as data URIs before opening sockets
+  Promise.all(
+    refFiles.map(
+      (file) =>
+        new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result || '');
+          reader.onerror = () => resolve('');
+          reader.readAsDataURL(file);
+        })
+    )
+  ).then((uris) => {
+    _doStart(uris.filter((u) => !!u));
+  });
 }
 
 function isExperimentalImageMethod(method) {
