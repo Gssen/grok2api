@@ -492,7 +492,7 @@ function openImageContinuousSocket(socketIndex, runToken, prompt, aspectRatio, a
     clearImageContinuousError();
     const startMsg = { type: 'start', prompt, aspect_ratio: aspectRatio };
     if (refImages && refImages.length > 0) {
-      startMsg.ref_file_uris = refImages;
+      startMsg.ref_images = refImages;
     }
     ws.send(JSON.stringify(startMsg));
   };
@@ -643,29 +643,16 @@ async function startImageContinuous() {
   const token = imageContinuousRunToken + 1;
   imageContinuousDesiredConcurrency = concurrency;
 
-  // 通过 HTTP 上传参考图到 Grok，拿到 file_uri
-  let refFileUris = [];
+  // 将参考图转为 base64 data URI
+  let refImages = [];
   if (imageRefAttachments.length > 0) {
-    const headers = buildApiHeaders();
-    if (!headers.Authorization) {
-      showToast('请先填写 API Key', 'warning');
-      return;
-    }
-    try {
-      for (const att of imageRefAttachments) {
-        const fd = new FormData();
-        fd.append('file', att.file);
-        const res = await fetch('/v1/uploads/grok', { method: 'POST', headers, body: fd });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data?.detail || `Upload failed (${res.status})`);
-        }
-        const data = await res.json();
-        if (data.file_uri) refFileUris.push(data.file_uri);
+    for (const att of imageRefAttachments) {
+      try {
+        const b64 = await fileToDataUrl(att.file);
+        if (b64) refImages.push(b64);
+      } catch (e) {
+        console.warn('Failed to read ref image:', e);
       }
-    } catch (e) {
-      showToast('参考图上传失败: ' + (e?.message || e), 'error');
-      return;
     }
   }
 
@@ -681,7 +668,7 @@ async function startImageContinuous() {
   updateImageContinuousStats();
 
   for (let i = 0; i < concurrency; i += 1) {
-    openImageContinuousSocket(i, token, prompt, aspectRatio, 0, refFileUris);
+    openImageContinuousSocket(i, token, prompt, aspectRatio, 0, refImages);
   }
 }
 
