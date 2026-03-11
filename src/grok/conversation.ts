@@ -86,6 +86,9 @@ export function buildConversationPayload(args: {
   const cfg = getModelInfo(requestModel);
   const { grokModel, mode, isVideoModel } = toGrokModel(requestModel);
 
+  // 上游需要把图片引用一起放入 fileAttachments，否则参考图会被忽略。
+  const mergedAttachments = [...imgIds, ...imgUris].filter(Boolean);
+
   if (cfg?.is_video_model) {
     if (!postId) throw new Error("视频模型缺少 postId（需要先创建 media post）");
 
@@ -134,7 +137,7 @@ export function buildConversationPayload(args: {
       temporary: settings.temporary ?? true,
       modelName: grokModel,
       message: content,
-      fileAttachments: imgIds,
+      fileAttachments: mergedAttachments,
       imageAttachments: [],
       disableSearch: false,
       enableImageGeneration: true,
