@@ -30,8 +30,6 @@ from app.services.grok.imagine_generation import (
 )
 from app.services.token import get_token_manager
 from app.core.auth import _load_legacy_api_keys
-from app.services.grok.assets import UploadService
-from app.api.v1.image import call_grok_experimental_edit
 
 
 router = APIRouter()
@@ -131,35 +129,6 @@ async def _collect_imagine_batch(token: str, prompt: str, aspect_ratio: str) -> 
     )
 
 
-async def _collect_imagine_edit_batch(token: str, prompt: str, file_uris: list[str]) -> list[str]:
-    return await call_grok_experimental_edit(
-        token=token,
-        prompt=prompt,
-        model_id="grok-imagine-1.0-edit",
-        file_uris=file_uris,
-        response_format="b64_json",
-    )
-
-
-async def _upload_ref_images(token: str, ref_images: list[str]) -> list[str]:
-    """Upload base64 data URI images to Grok, return file_uris."""
-    file_uris: list[str] = []
-    upload_service = UploadService()
-    try:
-        for data_uri in ref_images:
-            if not data_uri:
-                continue
-            try:
-                _, file_uri = await upload_service.upload(data_uri, token)
-                if file_uri:
-                    file_uris.append(file_uri)
-            except Exception as e:
-                logger.warning(f"Imagine ws ref image upload failed: {e}")
-    finally:
-        await upload_service.close()
-    return file_uris
-
-
 @router.websocket("/api/v1/admin/imagine/ws")
 async def admin_imagine_ws(websocket: WebSocket):
     if not await _verify_ws_api_key(websocket):
@@ -191,7 +160,7 @@ async def admin_imagine_ws(websocket: WebSocket):
         run_task = None
         stop_event.clear()
 
-    async def _run(prompt: str, aspect_ratio: str, ref_images: list[str] | None = None):
+    async def _run(prompt: str, aspect_ratio: str):
         model_id = "grok-imagine-1.0"
         model_info = ModelService.get(model_id)
         if not model_info or not model_info.is_image:
@@ -205,27 +174,6 @@ async def admin_imagine_ws(websocket: WebSocket):
             return
 
         token_mgr = await get_token_manager()
-
-        # Upload reference images once and pin the token
-        file_uris: list[str] = []
-        pinned_token: str = ""
-        if ref_images:
-            await _send({"type": "status", "status": "uploading"})
-            upload_token = token_mgr.get_token_for_model(model_info.model_id)
-            if upload_token:
-                file_uris = await _upload_ref_images(upload_token, ref_images)
-                if file_uris:
-                    pinned_token = upload_token
-            if not file_uris:
-                await _send(
-                    {
-                        "type": "error",
-                        "message": "Failed to upload reference images.",
-                        "code": "upload_failed",
-                    }
-                )
-                return
-
         sequence = 0
         run_id = uuid.uuid4().hex
         await _send(
@@ -241,8 +189,7 @@ async def admin_imagine_ws(websocket: WebSocket):
         while not stop_event.is_set():
             try:
                 await token_mgr.reload_if_stale()
-                # Use pinned token when reference images are uploaded
-                token = pinned_token or token_mgr.get_token_for_model(model_info.model_id)
+                token = token_mgr.get_token_for_model(model_info.model_id)
                 if not token:
                     await _send(
                         {
@@ -255,10 +202,7 @@ async def admin_imagine_ws(websocket: WebSocket):
                     continue
 
                 start_at = time.time()
-                if file_uris:
-                    images = await _collect_imagine_edit_batch(token, prompt, file_uris)
-                else:
-                    images = await _collect_imagine_batch(token, prompt, aspect_ratio)
+                images = await _collect_imagine_batch(token, prompt, aspect_ratio)
                 elapsed_ms = int((time.time() - start_at) * 1000)
 
                 sent_any = False
@@ -347,11 +291,8 @@ async def admin_imagine_ws(websocket: WebSocket):
                     )
                     continue
                 ratio = resolve_imagine_aspect_ratio(str(payload.get("aspect_ratio") or "2:3").strip())
-                ref_images = payload.get("ref_images") or []
-                if not isinstance(ref_images, list):
-                    ref_images = []
                 await _stop_run()
-                run_task = asyncio.create_task(_run(prompt, ratio, ref_images or None))
+                run_task = asyncio.create_task(_run(prompt, ratio))
             elif msg_type == "stop":
                 await _stop_run()
             elif msg_type == "ping":
