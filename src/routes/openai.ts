@@ -557,6 +557,7 @@ async function runImageCall(args: {
   requestModel: string;
   prompt: string;
   fileIds: string[];
+  fileUris?: string[];
   cookie: string;
   settings: Awaited<ReturnType<typeof getSettings>>["grok"];
   responseFormat: ImageResponseFormat;
@@ -566,7 +567,8 @@ async function runImageCall(args: {
     requestModel: args.requestModel,
     content: args.prompt,
     imgIds: args.fileIds,
-    imgUris: [],
+    // 参考图可能只识别 fileUri，透传以兼容上游。
+    imgUris: args.fileUris ?? [],
     settings: args.settings,
   });
   const upstream = await sendConversationRequest({
@@ -596,6 +598,7 @@ async function runImageStreamCall(args: {
   requestModel: string;
   prompt: string;
   fileIds: string[];
+  fileUris?: string[];
   cookie: string;
   settings: Awaited<ReturnType<typeof getSettings>>["grok"];
 }): Promise<Response> {
@@ -603,7 +606,8 @@ async function runImageStreamCall(args: {
     requestModel: args.requestModel,
     content: args.prompt,
     imgIds: args.fileIds,
-    imgUris: [],
+    // 参考图可能只识别 fileUri，透传以兼容上游。
+    imgUris: args.fileUris ?? [],
     settings: args.settings,
   });
   return sendConversationRequest({
@@ -1508,6 +1512,7 @@ openAiRoutes.post("/images/generations", async (c) => {
         requestModel: requestedModel,
         prompt: imageCallPrompt("generation", prompt),
         fileIds: [],
+        fileUris: [],
         cookie,
         settings: settingsBundle.grok,
       });
@@ -1607,6 +1612,7 @@ openAiRoutes.post("/images/generations", async (c) => {
           requestModel: requestedModel,
           prompt: imageCallPrompt("generation", prompt),
           fileIds: [],
+          fileUris: [],
           cookie,
           settings: settingsBundle.grok,
           responseFormat,
@@ -1809,6 +1815,7 @@ openAiRoutes.post("/images/edits", async (c) => {
         requestModel: requestedModel,
         prompt: imageCallPrompt("edit", prompt),
         fileIds,
+        fileUris,
         cookie,
         settings: settingsBundle.grok,
       });
@@ -1901,6 +1908,7 @@ openAiRoutes.post("/images/edits", async (c) => {
         requestModel: requestedModel,
         prompt: imageCallPrompt("edit", prompt),
         fileIds,
+        fileUris,
         cookie,
         settings: settingsBundle.grok,
         responseFormat,
