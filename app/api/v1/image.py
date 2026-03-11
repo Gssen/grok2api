@@ -888,6 +888,12 @@ async def edit_image(
     finally:
         await upload_service.close()
 
+    # 上游可能只识别 fileUri，合并两种引用，避免参考图失效。
+    attachment_refs: List[str] = []
+    for ref in [*file_ids, *file_uris]:
+        if ref and ref not in attachment_refs:
+            attachment_refs.append(ref)
+
     if edit_request.stream:
         if image_method == IMAGE_METHOD_IMAGINE_WS_EXPERIMENTAL:
             try:
@@ -942,7 +948,7 @@ async def edit_image(
                 mode=model_info.model_mode,
                 think=False,
                 stream=True,
-                file_attachments=file_ids,
+                file_attachments=attachment_refs,
             )
         except Exception:
             await _record_request(model_info.model_id, False)
@@ -1023,7 +1029,7 @@ async def edit_image(
                 token,
                 f"Image Edit: {edit_request.prompt}",
                 model_info,
-                file_attachments=file_ids,
+                file_attachments=attachment_refs,
                 response_format=response_format,
             )
         else:
@@ -1032,7 +1038,7 @@ async def edit_image(
                     token,
                     f"Image Edit: {edit_request.prompt}",
                     model_info,
-                    file_attachments=file_ids,
+                    file_attachments=attachment_refs,
                     response_format=response_format,
                 )
                 for _ in range(calls_needed)

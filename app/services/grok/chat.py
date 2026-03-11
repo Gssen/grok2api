@@ -408,21 +408,26 @@ class GrokChatService:
         # 处理附件上传
         file_ids = []
         image_ids = []
+        image_uris = []
         
         if attachments:
             upload_service = UploadService()
             try:
                 for attach_type, attach_data in attachments:
                     # 获取 ID
-                    file_id, _ = await upload_service.upload(attach_data, token)
+                    file_id, file_uri = await upload_service.upload(attach_data, token)
                     
                     if attach_type == "image":
                         # 图片 imageAttachments
-                        image_ids.append(file_id)
+                        if file_id:
+                            image_ids.append(file_id)
+                        if file_uri:
+                            image_uris.append(file_uri)
                         logger.debug(f"Image uploaded: {file_id}")
                     else:
                         # 文件 fileAttachments
-                        file_ids.append(file_id)
+                        if file_id:
+                            file_ids.append(file_id)
                         logger.debug(f"File uploaded: {file_id}")
             finally:
                 await upload_service.close()
@@ -430,10 +435,16 @@ class GrokChatService:
         stream = request.stream if request.stream is not None else get_config("grok.stream", True)
         think = request.think if request.think is not None else get_config("grok.thinking", False)
         
+        # 上游可能只识别 fileUri，合并后再透传，避免参考图失效。
+        merged_image_refs = []
+        for ref in [*image_ids, *image_uris]:
+            if ref and ref not in merged_image_refs:
+                merged_image_refs.append(ref)
+
         response = await self.chat(
             token, message, grok_model, mode, think, stream,
             file_attachments=file_ids,
-            image_attachments=image_ids
+            image_attachments=merged_image_refs
         )
         
         return response, stream, request.model
