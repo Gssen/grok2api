@@ -18,6 +18,15 @@ let imageContinuousLastError = '';
 let imageContinuousRunToken = 0;
 let imageContinuousDesiredConcurrency = 1;
 
+function fileToDataUri(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
 function q(id) {
   return document.getElementById(id);
 }
@@ -467,7 +476,7 @@ function parseWsMessage(raw) {
   }
 }
 
-function openImageContinuousSocket(socketIndex, runToken, prompt, aspectRatio, attempt = 0) {
+function openImageContinuousSocket(socketIndex, runToken, prompt, aspectRatio, attempt = 0, refImages = []) {
   const wsUrl = buildImagineWsUrl();
   const ws = new WebSocket(wsUrl);
   const socketState = {
@@ -490,7 +499,11 @@ function openImageContinuousSocket(socketIndex, runToken, prompt, aspectRatio, a
       return;
     }
     clearImageContinuousError();
-    ws.send(JSON.stringify({ type: 'start', prompt, aspect_ratio: aspectRatio }));
+    const startMsg = { type: 'start', prompt, aspect_ratio: aspectRatio };
+    if (refImages && refImages.length > 0) {
+      startMsg.ref_images = refImages;
+    }
+    ws.send(JSON.stringify(startMsg));
   };
 
   ws.onmessage = (event) => {
@@ -576,7 +589,7 @@ function openImageContinuousSocket(socketIndex, runToken, prompt, aspectRatio, a
         setTimeout(() => {
           if (!imageContinuousRunning || runToken !== imageContinuousRunToken) return;
           if (getImageContinuousOpenCount() >= imageContinuousDesiredConcurrency) return;
-          openImageContinuousSocket(socketIndex, runToken, prompt, aspectRatio, socketState.attempt + 1);
+          openImageContinuousSocket(socketIndex, runToken, prompt, aspectRatio, socketState.attempt + 1, refImages);
         }, 1200);
       }
 
@@ -620,7 +633,7 @@ function stopImageContinuous() {
   updateImageContinuousStats();
 }
 
-function startImageContinuous() {
+async function startImageContinuous() {
   if (!imageGenerationExperimental || getImageRunMode() !== 'continuous') {
     return;
   }
@@ -639,6 +652,19 @@ function startImageContinuous() {
   const token = imageContinuousRunToken + 1;
   imageContinuousDesiredConcurrency = concurrency;
 
+  // 将参考图转为 base64 data URI
+  let refImages = [];
+  if (imageRefAttachments.length > 0) {
+    for (const att of imageRefAttachments) {
+      try {
+        const b64 = await fileToDataUri(att.file);
+        if (b64) refImages.push(b64);
+      } catch (e) {
+        console.warn('Failed to read ref image:', e);
+      }
+    }
+  }
+
   stopImageContinuous();
   imageContinuousRunToken = token;
   imageContinuousRunning = true;
@@ -651,7 +677,7 @@ function startImageContinuous() {
   updateImageContinuousStats();
 
   for (let i = 0; i < concurrency; i += 1) {
-    openImageContinuousSocket(i, token, prompt, aspectRatio);
+    openImageContinuousSocket(i, token, prompt, aspectRatio, 0, refImages);
   }
 }
 
