@@ -895,49 +895,49 @@ async def edit_image(
             attachment_refs.append(ref)
 
     if edit_request.stream:
-        if image_method == IMAGE_METHOD_IMAGINE_WS_EXPERIMENTAL:
-            try:
-                service = ImagineExperimentalService()
-                response = await service.chat_edit(
-                    token=token,
-                    prompt=edit_request.prompt,
-                    file_uris=file_uris,
-                )
-                processor = ImageStreamProcessor(
-                    model_info.model_id,
-                    token,
-                    n=n,
-                    response_format=response_format,
-                )
+        try:
+            # 图像编辑优先走 imageReferences，避免参考图在 legacy 路径失效。
+            service = ImagineExperimentalService()
+            response = await service.chat_edit(
+                token=token,
+                prompt=edit_request.prompt,
+                file_uris=file_uris,
+            )
+            processor = ImageStreamProcessor(
+                model_info.model_id,
+                token,
+                n=n,
+                response_format=response_format,
+            )
 
-                async def _wrapped_experimental_stream():
-                    completed = False
+            async def _wrapped_experimental_stream():
+                completed = False
+                try:
+                    async for chunk in processor.process(response):
+                        yield chunk
+                    completed = True
+                finally:
                     try:
-                        async for chunk in processor.process(response):
-                            yield chunk
-                        completed = True
-                    finally:
-                        try:
-                            if completed:
-                                await token_mgr.sync_usage(
-                                    token,
-                                    model_info.model_id,
-                                    consume_on_fail=True,
-                                    is_usage=True,
-                                )
-                                await _record_request(model_info.model_id, True)
-                            else:
-                                await _record_request(model_info.model_id, False)
-                        except Exception:
-                            pass
+                        if completed:
+                            await token_mgr.sync_usage(
+                                token,
+                                model_info.model_id,
+                                consume_on_fail=True,
+                                is_usage=True,
+                            )
+                            await _record_request(model_info.model_id, True)
+                        else:
+                            await _record_request(model_info.model_id, False)
+                    except Exception:
+                        pass
 
-                return StreamingResponse(
-                    _wrapped_experimental_stream(),
-                    media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-                )
-            except Exception as e:
-                logger.warning(f"Experimental image edit stream failed, fallback to legacy: {e}")
+            return StreamingResponse(
+                _wrapped_experimental_stream(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            )
+        except Exception as e:
+            logger.warning(f"Experimental image edit stream failed, fallback to legacy: {e}")
 
         chat_service = GrokChatService()
         try:
@@ -989,38 +989,38 @@ async def edit_image(
         )
 
     all_images: List[str] = []
-    if image_method == IMAGE_METHOD_IMAGINE_WS_EXPERIMENTAL:
-        try:
-            calls_needed = (n + 1) // 2
-            if calls_needed == 1:
-                all_images = await call_grok_experimental_edit(
+    try:
+        # 图像编辑优先走 imageReferences，避免参考图在 legacy 路径失效。
+        calls_needed = (n + 1) // 2
+        if calls_needed == 1:
+            all_images = await call_grok_experimental_edit(
+                token=token,
+                prompt=edit_request.prompt,
+                model_id=model_info.model_id,
+                file_uris=file_uris,
+                response_format=response_format,
+            )
+        else:
+            tasks = [
+                call_grok_experimental_edit(
                     token=token,
                     prompt=edit_request.prompt,
                     model_id=model_info.model_id,
                     file_uris=file_uris,
                     response_format=response_format,
                 )
-            else:
-                tasks = [
-                    call_grok_experimental_edit(
-                        token=token,
-                        prompt=edit_request.prompt,
-                        model_id=model_info.model_id,
-                        file_uris=file_uris,
-                        response_format=response_format,
-                    )
-                    for _ in range(calls_needed)
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, Exception):
-                        logger.warning(f"Experimental image edit call failed: {result}")
-                    elif isinstance(result, list):
-                        all_images.extend(result)
-            if not all_images:
-                raise UpstreamException("Experimental image edit returned no images")
-        except Exception as e:
-            logger.warning(f"Experimental image edit failed, fallback to legacy: {e}")
+                for _ in range(calls_needed)
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.warning(f"Experimental image edit call failed: {result}")
+                elif isinstance(result, list):
+                    all_images.extend(result)
+        if not all_images:
+            raise UpstreamException("Experimental image edit returned no images")
+    except Exception as e:
+        logger.warning(f"Experimental image edit failed, fallback to legacy: {e}")
 
     if not all_images:
         calls_needed = (n + 1) // 2
