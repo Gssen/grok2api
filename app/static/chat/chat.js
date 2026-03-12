@@ -280,13 +280,17 @@ function renderAttachments(kind) {
   box.innerHTML = '';
   if (!list.length) {
     box.classList.add('hidden');
+    if (kind === 'image-ref') {
+      // 参考图清空时也要恢复持续模式通道选项
+      updateImageModeUI();
+    }
     return;
   }
   box.classList.remove('hidden');
   list.forEach((it, idx) => {
     const div = document.createElement('div');
     div.className = 'attach-item';
-    div.innerHTML = `<img src="${it.previewUrl}" alt="img"><button title="绉婚櫎">脳</button>`;
+    div.innerHTML = `<img src="${it.previewUrl}" alt="img"><button title="删除">删除</button>`;
     div.querySelector('button').addEventListener('click', () => {
       try { URL.revokeObjectURL(it.previewUrl); } catch (e) {}
       list.splice(idx, 1);
@@ -312,17 +316,7 @@ function getImageContinuousTransport() {
 }
 
 function resolveImageContinuousTransport() {
-  const hasRefImages = imageRefAttachments.length > 0;
-  const transportSelect = q('image-continuous-transport');
-  let transport = getImageContinuousTransport();
-
-  // WS 不支持编辑图片或非实验后端，自动切换到 SSE
-  if (transport === 'ws' && (hasRefImages || !imageGenerationExperimental)) {
-    transport = 'sse';
-    if (transportSelect) transportSelect.value = 'sse';
-  }
-
-  return transport;
+  return getImageContinuousTransport();
 }
 
 function getImageContinuousConcurrency() {
@@ -377,18 +371,22 @@ function updateImageContinuousButtons() {
 function updateImageContinuousTransportUI() {
   const transportWrap = q('image-continuous-transport-wrap');
   const transportSelect = q('image-continuous-transport');
+  const transportHint = q('image-continuous-transport-hint');
   const isContinuous = getImageRunMode() === 'continuous';
   if (transportWrap) transportWrap.classList.toggle('hidden', !isContinuous);
   if (!transportSelect) return;
 
   const hasRefImages = imageRefAttachments.length > 0;
-  const wsOption = transportSelect.querySelector('option[value="ws"]');
-  const wsAvailable = imageGenerationExperimental && !hasRefImages;
-  if (wsOption) wsOption.disabled = !wsAvailable;
-
-  if (!wsAvailable && transportSelect.value === 'ws') {
-    // 参考图或旧后端时强制走 SSE
-    transportSelect.value = 'sse';
+  const transport = getImageContinuousTransport();
+  if (transportHint) {
+    // WS 模式下参考图不会生效，提示用户
+    if (isContinuous && transport === 'ws' && hasRefImages) {
+      transportHint.textContent = '提示：WS 持续模式不支持参考图，已自动忽略。';
+      transportHint.classList.remove('hidden');
+    } else {
+      transportHint.textContent = '';
+      transportHint.classList.add('hidden');
+    }
   }
 }
 
@@ -428,10 +426,6 @@ function updateImageModeUI() {
   const hint = q('image-mode-hint');
   const concurrencyWrap = q('image-concurrency-wrap');
   const runModeWrap = q('image-run-mode-wrap');
-
-  if (!isExperimental && imageContinuousRunning && imageContinuousTransportMode === 'ws') {
-    stopImageContinuous();
-  }
 
   const shouldShowConcurrency = isExperimental || getImageRunMode() === 'continuous';
   if (hint) hint.classList.toggle('hidden', !isExperimental);
@@ -790,12 +784,6 @@ function startImageContinuous() {
     return;
   }
 
-  const selectedTransport = getImageContinuousTransport();
-  if (selectedTransport === 'ws' && imageRefAttachments.length > 0) {
-    showToast('参考图仅支持 SSE 持续模式，已自动切换。', 'warning');
-  } else if (selectedTransport === 'ws' && !imageGenerationExperimental) {
-    showToast('当前后端未开启 WS 持续模式，已切换到 SSE。', 'warning');
-  }
   const transport = resolveImageContinuousTransport();
 
   const aspectRatio = String(q('image-aspect')?.value || '2:3').trim() || '2:3';
