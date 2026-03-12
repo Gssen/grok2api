@@ -9,6 +9,7 @@ let imageRefAttachments = [];
 let imageGenerationMethod = 'legacy';
 let imageGenerationExperimental = false;
 let imageContinuousSockets = [];
+let imageContinuousTasks = [];
 let imageContinuousRunning = false;
 let imageContinuousCount = 0;
 let imageContinuousLatencyTotal = 0;
@@ -17,6 +18,7 @@ let imageContinuousActive = 0;
 let imageContinuousLastError = '';
 let imageContinuousRunToken = 0;
 let imageContinuousDesiredConcurrency = 1;
+let imageContinuousTransportMode = 'ws';
 
 function q(id) {
   return document.getElementById(id);
@@ -222,6 +224,10 @@ async function init() {
     }
     updateImageModeUI();
   });
+  q('image-continuous-transport')?.addEventListener('change', () => {
+    resolveImageContinuousTransport();
+    updateImageModeUI();
+  });
   window.addEventListener('beforeunload', () => {
     stopImageContinuous();
   });
@@ -288,6 +294,11 @@ function renderAttachments(kind) {
     });
     box.appendChild(div);
   });
+
+  if (kind === 'image-ref') {
+    // 参考图变化时需要重新评估持续模式通道
+    updateImageModeUI();
+  }
 }
 
 function getImageRunMode() {
@@ -295,12 +306,33 @@ function getImageRunMode() {
   return value === 'continuous' ? 'continuous' : 'single';
 }
 
+function getImageContinuousTransport() {
+  const value = String(q('image-continuous-transport')?.value || 'ws').trim().toLowerCase();
+  return value === 'sse' ? 'sse' : 'ws';
+}
+
+function resolveImageContinuousTransport() {
+  const hasRefImages = imageRefAttachments.length > 0;
+  const transportSelect = q('image-continuous-transport');
+  let transport = getImageContinuousTransport();
+
+  // WS 不支持编辑图片或非实验后端，自动切换到 SSE
+  if (transport === 'ws' && (hasRefImages || !imageGenerationExperimental)) {
+    transport = 'sse';
+    if (transportSelect) transportSelect.value = 'sse';
+  }
+
+  return transport;
+}
+
 function getImageContinuousConcurrency() {
   return Math.max(1, Math.min(3, Math.floor(Number(q('image-concurrency')?.value || 1) || 1)));
 }
 
 function getImageContinuousActiveCount() {
-  return imageContinuousSockets.filter((it) => it && it.active && !it.closed).length;
+  const wsActive = imageContinuousSockets.filter((it) => it && it.active && !it.closed).length;
+  const sseActive = imageContinuousTasks.filter((it) => it && it.active).length;
+  return wsActive + sseActive;
 }
 
 function getImageContinuousOpenCount() {
@@ -335,15 +367,33 @@ function updateImageContinuousStats() {
 }
 
 function updateImageContinuousButtons() {
-  const isContinuous = imageGenerationExperimental && getImageRunMode() === 'continuous';
+  const isContinuous = getImageRunMode() === 'continuous';
   const startBtn = q('image-start-btn');
   const stopBtn = q('image-stop-btn');
   if (startBtn) startBtn.disabled = !isContinuous || imageContinuousRunning;
   if (stopBtn) stopBtn.disabled = !isContinuous || !imageContinuousRunning;
 }
 
+function updateImageContinuousTransportUI() {
+  const transportWrap = q('image-continuous-transport-wrap');
+  const transportSelect = q('image-continuous-transport');
+  const isContinuous = getImageRunMode() === 'continuous';
+  if (transportWrap) transportWrap.classList.toggle('hidden', !isContinuous);
+  if (!transportSelect) return;
+
+  const hasRefImages = imageRefAttachments.length > 0;
+  const wsOption = transportSelect.querySelector('option[value="ws"]');
+  const wsAvailable = imageGenerationExperimental && !hasRefImages;
+  if (wsOption) wsOption.disabled = !wsAvailable;
+
+  if (!wsAvailable && transportSelect.value === 'ws') {
+    // 参考图或旧后端时强制走 SSE
+    transportSelect.value = 'sse';
+  }
+}
+
 function updateImageRunModeUI() {
-  const isContinuous = imageGenerationExperimental && getImageRunMode() === 'continuous';
+  const isContinuous = getImageRunMode() === 'continuous';
   const nWrap = q('image-n-wrap');
   const generateWrap = q('image-generate-wrap');
   const resultBox = q('image-results');
@@ -362,11 +412,13 @@ function updateImageRunModeUI() {
   }
 
   if (isContinuous && imageContinuousRunning) {
-    setImageStatusText(imageContinuousActive > 0 ? 'Running' : 'Connecting');
+    const isSse = imageContinuousTransportMode === 'sse';
+    setImageStatusText(imageContinuousActive > 0 || isSse ? 'Running' : 'Connecting');
   } else if (isContinuous) {
     setImageStatusText('Idle');
   }
 
+  updateImageContinuousTransportUI();
   updateImageContinuousButtons();
   updateImageContinuousStats();
 }
@@ -376,16 +428,15 @@ function updateImageModeUI() {
   const hint = q('image-mode-hint');
   const concurrencyWrap = q('image-concurrency-wrap');
   const runModeWrap = q('image-run-mode-wrap');
-  const runMode = q('image-run-mode');
 
-  if (!isExperimental && imageContinuousRunning) {
+  if (!isExperimental && imageContinuousRunning && imageContinuousTransportMode === 'ws') {
     stopImageContinuous();
   }
 
+  const shouldShowConcurrency = isExperimental || getImageRunMode() === 'continuous';
   if (hint) hint.classList.toggle('hidden', !isExperimental);
-  if (concurrencyWrap) concurrencyWrap.classList.toggle('hidden', !isExperimental);
-  if (runModeWrap) runModeWrap.classList.toggle('hidden', !isExperimental);
-  if (runMode && !isExperimental) runMode.value = 'single';
+  if (concurrencyWrap) concurrencyWrap.classList.toggle('hidden', !shouldShowConcurrency);
+  if (runModeWrap) runModeWrap.classList.remove('hidden');
 
   updateImageRunModeUI();
 }
@@ -409,7 +460,7 @@ function resetImageContinuousMetrics(resetCount) {
   updateImageContinuousStats();
 }
 
-function appendWaterfallImage(item, connectionIndex) {
+function appendWaterfallImage(item, connectionLabel) {
   const src = pickImageSrc(item);
   if (!src) return;
 
@@ -419,13 +470,18 @@ function appendWaterfallImage(item, connectionIndex) {
   const seq = Number(item?.sequence) || waterfall.children.length + 1;
   const elapsed = Math.max(0, Number(item?.elapsed_ms) || 0);
   const ratio = String(item?.aspect_ratio || '').trim();
+  const channel =
+    typeof connectionLabel === 'number'
+      ? `WS${connectionLabel + 1}`
+      : String(connectionLabel || '').trim();
+  const channelText = channel ? `路 ${channel}` : '路 -';
 
   const card = document.createElement('div');
   card.className = 'waterfall-item';
   card.innerHTML = `
     <img alt="image" src="${src}" />
     <div class="waterfall-meta">
-      <span>#${seq} 路 WS${connectionIndex + 1}</span>
+      <span>#${seq} ${channelText}</span>
       <span>${ratio || '-'} 路 ${elapsed > 0 ? `${elapsed}ms` : '-'}</span>
     </div>
   `;
@@ -588,6 +644,95 @@ function openImageContinuousSocket(socketIndex, runToken, prompt, aspectRatio, a
   };
 }
 
+function openImageContinuousSseTask(taskIndex, runToken, prompt, aspectRatio) {
+  const task = {
+    index: taskIndex,
+    runToken,
+    controller: null,
+    active: false,
+    stopped: false,
+  };
+  imageContinuousTasks.push(task);
+
+  runImageContinuousSseTask(task, prompt, aspectRatio).catch((err) => {
+    const message = err?.message || err;
+    setImageContinuousError(message);
+  });
+}
+
+async function runImageContinuousSseTask(task, prompt, aspectRatio) {
+  const apiHeaders = buildApiHeaders();
+  const model = String(q('model-select').value || 'grok-imagine-1.0').trim();
+  const { size } = buildImageRequestConfig();
+  const requestHeaders = { ...apiHeaders, 'Content-Type': 'application/json' };
+  // SSE 持续模式单次请求默认出 2 张（流式上限为 2）
+  const batchSize = 2;
+
+  // SSE 持续模式：不断发起流式请求，直到用户停止
+  while (imageContinuousRunning && task.runToken === imageContinuousRunToken) {
+    const controller = new AbortController();
+    task.controller = controller;
+    task.active = true;
+    updateImageContinuousStats();
+
+    try {
+      let rendered = 0;
+      const hasRefImages = imageRefAttachments.length > 0;
+      const channelLabel = `SSE${task.index + 1}`;
+
+      if (hasRefImages) {
+        const fd = new FormData();
+        fd.append('prompt', prompt);
+        fd.append('model', 'grok-imagine-1.0-edit');
+        fd.append('n', String(batchSize));
+        fd.append('stream', 'true');
+        imageRefAttachments.forEach((att) => {
+          fd.append('image[]', att.file);
+        });
+
+        rendered = await streamImageEdits(fd, apiHeaders, {
+          signal: controller.signal,
+          suppressCards: true,
+          onImage: (obj, elapsedMs) => {
+            appendWaterfallImage(
+              { ...obj, elapsed_ms: elapsedMs, aspect_ratio: aspectRatio },
+              channelLabel,
+            );
+          },
+        });
+      } else {
+        const reqBody = { prompt, model, n: batchSize, size, concurrency: 1 };
+        rendered = await streamImage(reqBody, requestHeaders, {
+          signal: controller.signal,
+          suppressCards: true,
+          onImage: (obj, elapsedMs) => {
+            appendWaterfallImage(
+              { ...obj, elapsed_ms: elapsedMs, aspect_ratio: aspectRatio },
+              channelLabel,
+            );
+          },
+        });
+      }
+
+      if (!rendered) throw new Error('No image generated');
+      if (imageContinuousRunning) setImageStatusText('Running');
+    } catch (e) {
+      if (controller.signal.aborted) break;
+      const message = e?.message || e;
+      setImageContinuousError(message);
+      if (imageContinuousRunning) setImageStatusText('Running (with errors)');
+    } finally {
+      task.active = false;
+      updateImageContinuousStats();
+    }
+
+    if (!imageContinuousRunning || task.runToken !== imageContinuousRunToken) break;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
+  task.stopped = true;
+}
+
 function stopImageContinuous() {
   imageContinuousRunToken += 1;
   imageContinuousRunning = false;
@@ -611,7 +756,18 @@ function stopImageContinuous() {
   });
   imageContinuousSockets = [];
 
-  if (imageGenerationExperimental && getImageRunMode() === 'continuous') {
+  // SSE 持续模式需要主动中止正在进行的流式请求
+  imageContinuousTasks.forEach((task) => {
+    try {
+      task.controller?.abort();
+    } catch (e) {}
+    task.active = false;
+    task.stopped = true;
+  });
+  imageContinuousTasks = [];
+  imageContinuousTransportMode = 'ws';
+
+  if (getImageRunMode() === 'continuous') {
     setImageStatusText('Stopped');
   } else {
     setImageStatusText('Idle');
@@ -621,7 +777,7 @@ function stopImageContinuous() {
 }
 
 function startImageContinuous() {
-  if (!imageGenerationExperimental || getImageRunMode() !== 'continuous') {
+  if (getImageRunMode() !== 'continuous') {
     return;
   }
   const prompt = String(q('image-prompt')?.value || '').trim();
@@ -634,6 +790,14 @@ function startImageContinuous() {
     return;
   }
 
+  const selectedTransport = getImageContinuousTransport();
+  if (selectedTransport === 'ws' && imageRefAttachments.length > 0) {
+    showToast('参考图仅支持 SSE 持续模式，已自动切换。', 'warning');
+  } else if (selectedTransport === 'ws' && !imageGenerationExperimental) {
+    showToast('当前后端未开启 WS 持续模式，已切换到 SSE。', 'warning');
+  }
+  const transport = resolveImageContinuousTransport();
+
   const aspectRatio = String(q('image-aspect')?.value || '2:3').trim() || '2:3';
   const concurrency = getImageContinuousConcurrency();
   const token = imageContinuousRunToken + 1;
@@ -642,16 +806,21 @@ function startImageContinuous() {
   stopImageContinuous();
   imageContinuousRunToken = token;
   imageContinuousRunning = true;
+  imageContinuousTransportMode = transport;
   clearImageContinuousError();
   imageContinuousActive = 0;
   if (!q('image-waterfall')?.children?.length) resetImageContinuousMetrics(true);
 
-  setImageStatusText('Connecting');
+  setImageStatusText(transport === 'ws' ? 'Connecting' : 'Running');
   updateImageContinuousButtons();
   updateImageContinuousStats();
 
   for (let i = 0; i < concurrency; i += 1) {
-    openImageContinuousSocket(i, token, prompt, aspectRatio);
+    if (transport === 'ws') {
+      openImageContinuousSocket(i, token, prompt, aspectRatio);
+    } else {
+      openImageContinuousSseTask(i, token, prompt, aspectRatio);
+    }
   }
 }
 
@@ -690,7 +859,7 @@ async function refreshImageGenerationMethod() {
     }
   } catch (e) {}
 
-  if (!imageGenerationExperimental) {
+  if (!imageGenerationExperimental && imageContinuousRunning && imageContinuousTransportMode === 'ws') {
     stopImageContinuous();
   }
 
@@ -966,11 +1135,14 @@ function buildImageRequestConfig() {
   return { size: ratio, concurrency };
 }
 
-async function streamImage(body, headers) {
+async function streamImage(body, headers, options = {}) {
+  const { onImage, onProgress, signal, suppressCards } = options;
+  const startedAt = performance.now();
   const res = await fetch('/v1/images/generations', {
     method: 'POST',
     headers,
     body: JSON.stringify({ ...body, stream: true }),
+    signal,
   });
 
   if (!res.ok || !res.body) {
@@ -980,7 +1152,7 @@ async function streamImage(body, headers) {
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  const cardMap = new Map();
+  const cardMap = suppressCards ? null : new Map();
   const completedSet = new Set();
   let rendered = 0;
   let buf = '';
@@ -1017,20 +1189,22 @@ async function streamImage(body, headers) {
 
       const type = String(obj?.type || event || '').trim();
       const idx = Math.max(0, Number(obj?.index) || 0);
-      const card = ensureImageCard(cardMap, idx);
+      const card = suppressCards ? null : ensureImageCard(cardMap, idx);
 
       if (type === 'image_generation.partial_image') {
-        updateImageCardProgress(card, obj?.progress ?? 0);
+        if (card) updateImageCardProgress(card, obj?.progress ?? 0);
+        if (onProgress) onProgress(obj);
         continue;
       }
 
       if (type === 'image_generation.completed') {
         const src = pickImageSrc(obj);
         const failed = !src;
-        updateImageCardCompleted(card, src, failed);
+        if (card) updateImageCardCompleted(card, src, failed);
         if (!failed && !completedSet.has(idx)) {
           completedSet.add(idx);
           rendered += 1;
+          if (onImage) onImage(obj, Math.round(performance.now() - startedAt), src);
         }
       }
     }
@@ -1039,11 +1213,14 @@ async function streamImage(body, headers) {
   return rendered;
 }
 
-async function streamImageEdits(formData, apiHeaders) {
+async function streamImageEdits(formData, apiHeaders, options = {}) {
+  const { onImage, onProgress, signal, suppressCards } = options;
+  const startedAt = performance.now();
   const res = await fetch('/v1/images/edits', {
     method: 'POST',
     headers: apiHeaders,
     body: formData,
+    signal,
   });
 
   if (!res.ok || !res.body) {
@@ -1053,7 +1230,7 @@ async function streamImageEdits(formData, apiHeaders) {
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  const cardMap = new Map();
+  const cardMap = suppressCards ? null : new Map();
   const completedSet = new Set();
   let rendered = 0;
   let buf = '';
@@ -1090,20 +1267,22 @@ async function streamImageEdits(formData, apiHeaders) {
 
       const type = String(obj?.type || event || '').trim();
       const idx = Math.max(0, Number(obj?.index) || 0);
-      const card = ensureImageCard(cardMap, idx);
+      const card = suppressCards ? null : ensureImageCard(cardMap, idx);
 
       if (type === 'image_generation.partial_image') {
-        updateImageCardProgress(card, obj?.progress ?? 0);
+        if (card) updateImageCardProgress(card, obj?.progress ?? 0);
+        if (onProgress) onProgress(obj);
         continue;
       }
 
       if (type === 'image_generation.completed') {
         const src = pickImageSrc(obj);
         const failed = !src;
-        updateImageCardCompleted(card, src, failed);
+        if (card) updateImageCardCompleted(card, src, failed);
         if (!failed && !completedSet.has(idx)) {
           completedSet.add(idx);
           rendered += 1;
+          if (onImage) onImage(obj, Math.round(performance.now() - startedAt), src);
         }
       }
     }
@@ -1119,7 +1298,7 @@ async function generateImage() {
   const apiHeaders = buildApiHeaders();
   if (!apiHeaders.Authorization) return showToast('请先填写 API Key', 'warning');
 
-  if (imageGenerationExperimental && getImageRunMode() === 'continuous') {
+  if (getImageRunMode() === 'continuous') {
     startImageContinuous();
     return;
   }
